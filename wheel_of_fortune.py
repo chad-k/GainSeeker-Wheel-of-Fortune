@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 # =========================
-# Page setup
+# Config
 # =========================
 st.set_page_config(page_title="Wheel of Fortune", layout="wide")
 
@@ -20,7 +20,13 @@ DEFAULT_WHEEL = [
     "BANKRUPT", "LOSE A TURN"
 ]
 
-# Allow typical documentation-style proper nouns
+# Put the CSV in your repo and set the RAW URL here:
+DEFAULT_CSV_URL = (
+    "https://raw.githubusercontent.com/chad-k/GainSeeker-Wheel-of-Fortune/main/"
+    "gainseeker_proper_nouns.csv"
+)
+
+# Allow typical doc-style proper nouns (numbers, slashes, dots, hyphens, etc.)
 ALLOWED_PUZZLE_RE = re.compile(r"^[A-Za-z0-9\s&\-\./'()]+$")
 
 # =========================
@@ -35,13 +41,13 @@ def mask_phrase(phrase: str, guessed: set[str]) -> str:
 def count_letter(phrase: str, letter: str) -> int:
     return sum(1 for ch in phrase if ch == letter)
 
-def load_proper_nouns_from_csv_bytes(file_bytes: bytes) -> list[str]:
+def load_puzzles_from_csv_bytes(file_bytes: bytes) -> list[str]:
     try:
         df = pd.read_csv(BytesIO(file_bytes))
     except Exception:
         return []
 
-    # Prefer the column produced by your extractor, else fall back to first column
+    # Prefer known column name, else first column
     if "ProperNounCandidate" in df.columns:
         series = df["ProperNounCandidate"]
     else:
@@ -58,7 +64,7 @@ def load_proper_nouns_from_csv_bytes(file_bytes: bytes) -> list[str]:
             continue
         puzzles.append(normalize_phrase(s))
 
-    # de-duplicate
+    # de-dup preserve order
     seen = set()
     out = []
     for p in puzzles:
@@ -69,10 +75,6 @@ def load_proper_nouns_from_csv_bytes(file_bytes: bytes) -> list[str]:
 
 @st.cache_data(show_spinner=False)
 def fetch_url_bytes(url: str) -> bytes:
-    """
-    Download bytes from a URL with a User-Agent header (GitHub raw sometimes prefers it).
-    Cached to avoid re-downloading on every rerun.
-    """
     req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urlopen(req) as resp:
         return resp.read()
@@ -86,8 +88,10 @@ def ensure_state():
         "total_bank": 0,
         "last_spin": None,
         "must_spin": True,
-        "message": "Load words from GitHub to begin.",
+        "message": "Loading words...",
         "lives": 5,
+        "csv_url": DEFAULT_CSV_URL,
+        "load_error": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -103,11 +107,36 @@ def new_round(puzzles: list[str]):
     st.session_state.must_spin = True
     st.session_state.message = "New puzzle loaded. Spin to start!"
 
-ensure_state()
+def auto_load_words():
+    """
+    Load words once (per session). Uses caching for download.
+    If it fails, store error so UI can show Retry.
+    """
+    if st.session_state.puzzles:
+        return
+
+    url = st.session_state.csv_url
+    try:
+        data = fetch_url_bytes(url)
+        puzzles = load_puzzles_from_csv_bytes(data)
+        if not puzzles:
+            st.session_state.load_error = "Downloaded CSV, but found no valid puzzles. Check the CSV contents/column names."
+            st.session_state.message = "Failed to load puzzles."
+            return
+
+        st.session_state.puzzles = puzzles
+        st.session_state.load_error = ""
+        new_round(puzzles)
+    except Exception as e:
+        st.session_state.load_error = f"Could not download CSV from GitHub. Error: {e}"
+        st.session_state.message = "Failed to load puzzles."
 
 # =========================
-# UI
+# App
 # =========================
+ensure_state()
+auto_load_words()
+
 st.title("🎡 Wheel of Fortune")
 
 # ---------- SIDEBAR ----------
@@ -164,31 +193,29 @@ When lives reach **0**, the round ends.
 """)
 
     st.divider()
-    st.header("Load Words (GitHub)")
+    st.header("Data Source (GitHub)")
 
-    # Default raw URL (you control the CSV location)
-    default_csv_url = (
-        "https://raw.githubusercontent.com/chad-k/GainSeeker-Wheel-of-Fortune/main/"
-        "gainseeker_proper_nouns.csv"
-    )
+    st.session_state.csv_url = st.text_input("CSV Raw URL", value=st.session_state.csv_url)
 
-    csv_url = st.text_input("CSV Raw URL", value=default_csv_url)
+    if st.session_state.load_error:
+        st.error(st.session_state.load_error)
 
-    if st.button("Load Words from GitHub", use_container_width=True):
-        try:
-            data = fetch_url_bytes(csv_url)
-            nouns = load_proper_nouns_from_csv_bytes(data)
-            if nouns:
-                st.session_state.puzzles = nouns
-                st.success(f"Loaded {len(nouns)} puzzles!")
-                st.caption("Sample:")
-                st.write(nouns[:10])
-                new_round(nouns)
+        colA, colB = st.columns(2)
+        with colA:
+            if st.button("Retry Load", use_container_width=True):
+                st.session_state.puzzles = []
+                st.session_state.puzzle = ""
+                st.session_state.load_error = ""
+                st.cache_data.clear()
                 st.rerun()
-            else:
-                st.error("Downloaded the CSV, but found no valid puzzles (check CSV columns/content).")
-        except Exception as e:
-            st.error(f"Could not download/read CSV. Error: {e}")
+        with colB:
+            if st.button("Clear Cache", use_container_width=True):
+                st.cache_data.clear()
+                st.rerun()
+    else:
+        st.success(f"Loaded {len(st.session_state.puzzles)} puzzles.")
+        with st.expander("Preview"):
+            st.write(st.session_state.puzzles[:25])
 
     st.divider()
     st.header("Game Settings")
@@ -203,7 +230,7 @@ When lives reach **0**, the round ends.
 
 # ---------- MAIN GAME ----------
 if not st.session_state.puzzle:
-    st.info("Click **Load Words from GitHub** in the sidebar to begin.")
+    st.info("No puzzle loaded. Check the GitHub CSV URL in the sidebar.")
     st.stop()
 
 puzzle = st.session_state.puzzle
@@ -234,6 +261,7 @@ with c1:
         else:
             result = random.choice(DEFAULT_WHEEL)
             st.session_state.last_spin = result
+
             if result == "BANKRUPT":
                 st.session_state.round_bank = 0
                 st.session_state.must_spin = True
@@ -244,6 +272,7 @@ with c1:
             else:
                 st.session_state.must_spin = False
                 st.session_state.message = f"Spun ${result}. Guess a consonant!"
+
         st.rerun()
 
 # ---------- GUESS CONSONANT ----------
@@ -268,7 +297,9 @@ with c2:
             else:
                 st.session_state.lives -= 1
                 st.session_state.message = f"❌ No {letter}"
+            # require spin again after consonant guess
             st.session_state.must_spin = True
+
         st.rerun()
 
 # ---------- BUY VOWEL ----------
@@ -282,7 +313,7 @@ with c3:
         elif vowel in guessed:
             st.session_state.message = f"{vowel} already guessed."
         else:
-            st.session_state.round_bank -= vowel_cost
+            st.session_state.round_bank -= int(vowel_cost)
             guessed.add(vowel)
             hits = count_letter(puzzle, vowel)
             if hits == 0:
@@ -290,22 +321,25 @@ with c3:
                 st.session_state.message = f"❌ No {vowel}"
             else:
                 st.session_state.message = f"✅ {vowel} ×{hits}"
+
         st.rerun()
 
 st.divider()
 
 # ---------- SOLVE ----------
 solution = st.text_input("Solve the puzzle", key="solve").strip()
-if st.button("Solve", use_container_width=False):
+if st.button("Solve"):
     if normalize_phrase(solution) == puzzle:
         st.session_state.total_bank += st.session_state.round_bank
         st.session_state.message = f"🎉 CORRECT! +${st.session_state.round_bank}"
+
         for ch in puzzle:
             if ch in ALPHABET:
                 guessed.add(ch)
     else:
         st.session_state.lives -= 1
-        st.session_state.message = "❌ Wrong answer."
+        st.session_state.message = f"❌ Wrong answer. Lives: {st.session_state.lives}"
+
     st.rerun()
 
 # ---------- WIN CHECK ----------
