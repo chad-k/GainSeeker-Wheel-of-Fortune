@@ -1,3 +1,4 @@
+import os
 import re
 import random
 from io import BytesIO
@@ -27,9 +28,16 @@ DEFAULT_CSV_URL = (
     "gainseeker_proper_nouns.csv"
 )
 
+# Allow doc-style proper nouns (numbers, slashes, dots, hyphens, etc.)
 ALLOWED_PUZZLE_RE = re.compile(r"^[A-Za-z0-9\s&\-\./'()]+$")
 
-HIGHSCORE_PATH = Path("highscores.csv")  # local persists; Streamlit Cloud may reset on redeploy
+# High score storage (NOT GitHub)
+# - Local dev: store next to this script
+# - Streamlit Cloud: store in /tmp (writable, but may reset on redeploy)
+if os.path.exists("/mount/src"):
+    HIGHSCORE_PATH = Path("/tmp/highscores.csv")
+else:
+    HIGHSCORE_PATH = Path(__file__).with_name("highscores.csv")
 
 # =========================
 # Helpers
@@ -80,68 +88,26 @@ def fetch_url_bytes(url: str) -> bytes:
     with urlopen(req) as resp:
         return resp.read()
 
-def ensure_state():
-    defaults = {
-        "puzzles": [],
-        "puzzle": "",
-        "guessed_list": [],      # store as list (stable)
-        "round_bank": 0,
-        "total_bank": 0,
-        "last_spin": None,
-        "must_spin": True,
-        "message": "Loading words...",
-        "lives": 5,
-        "csv_url": DEFAULT_CSV_URL,
-        "load_error": "",
-        "last_earned": 0,
-        "player_name": "Player 1",
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-def new_round(puzzles: list[str]):
-    if not puzzles:
-        return
-    st.session_state.puzzle = normalize_phrase(random.choice(puzzles))
-    st.session_state.guessed_list = []
-    st.session_state.round_bank = 0
-    st.session_state.last_spin = None
-    st.session_state.must_spin = True
-    st.session_state.last_earned = 0
-    st.session_state.message = "New puzzle loaded. Spin to start!"
-
-def auto_load_words():
-    if st.session_state.puzzles:
-        return
-
-    try:
-        data = fetch_url_bytes(st.session_state.csv_url)
-        puzzles = load_puzzles_from_csv_bytes(data)
-        if not puzzles:
-            st.session_state.load_error = "Downloaded CSV, but no valid puzzles found."
-            st.session_state.message = "Failed to load puzzles."
-            return
-        st.session_state.puzzles = puzzles
-        st.session_state.load_error = ""
-        new_round(puzzles)
-    except Exception as e:
-        st.session_state.load_error = f"Could not download CSV. Error: {e}"
-        st.session_state.message = "Failed to load puzzles."
+def ensure_highscore_file():
+    if not HIGHSCORE_PATH.exists():
+        HIGHSCORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        HIGHSCORE_PATH.write_text("name,score,timestamp\n", encoding="utf-8")
 
 def read_highscores() -> pd.DataFrame:
-    if not HIGHSCORE_PATH.exists():
-        return pd.DataFrame(columns=["name", "score", "timestamp"])
+    ensure_highscore_file()
     try:
         df = pd.read_csv(HIGHSCORE_PATH)
         if not set(["name", "score", "timestamp"]).issubset(df.columns):
             return pd.DataFrame(columns=["name", "score", "timestamp"])
         df["score"] = pd.to_numeric(df["score"], errors="coerce").fillna(0).astype(int)
+        df["name"] = df["name"].astype(str)
+        df["timestamp"] = df["timestamp"].astype(str)
         return df
     except Exception:
         return pd.DataFrame(columns=["name", "score", "timestamp"])
 
 def write_highscore(name: str, score: int):
+    ensure_highscore_file()
     name = (name or "Player 1").strip()[:40]
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     row = pd.DataFrame([{"name": name, "score": int(score), "timestamp": ts}])
@@ -158,6 +124,59 @@ def top_highscores(n: int = 10) -> pd.DataFrame:
         return df
     return df.sort_values("score", ascending=False).head(n).reset_index(drop=True)
 
+def ensure_state():
+    defaults = {
+        "puzzles": [],
+        "puzzle": "",
+        "guessed_list": [],      # store as list (stable)
+        "round_bank": 0,
+        "total_bank": 0,
+        "last_spin": None,
+        "must_spin": True,
+        "message": "Loading words...",
+        # IMPORTANT: separate starting lives vs in-game lives
+        "starting_lives": 5,
+        "lives": 5,
+        "csv_url": DEFAULT_CSV_URL,
+        "load_error": "",
+        "last_earned": 0,
+        "player_name": "Player 1",
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+def new_round(puzzles: list[str]):
+    """Starts a new puzzle AND resets lives to starting_lives."""
+    if not puzzles:
+        return
+    st.session_state.puzzle = normalize_phrase(random.choice(puzzles))
+    st.session_state.guessed_list = []
+    st.session_state.round_bank = 0
+    st.session_state.last_spin = None
+    st.session_state.must_spin = True
+    st.session_state.last_earned = 0
+    # ✅ Lives reset here
+    st.session_state.lives = int(st.session_state.starting_lives)
+    st.session_state.message = "New puzzle loaded. Spin to start!"
+
+def auto_load_words():
+    if st.session_state.puzzles:
+        return
+    try:
+        data = fetch_url_bytes(st.session_state.csv_url)
+        puzzles = load_puzzles_from_csv_bytes(data)
+        if not puzzles:
+            st.session_state.load_error = "Downloaded CSV, but no valid puzzles found."
+            st.session_state.message = "Failed to load puzzles."
+            return
+        st.session_state.puzzles = puzzles
+        st.session_state.load_error = ""
+        new_round(puzzles)  # ✅ sets puzzle + resets lives
+    except Exception as e:
+        st.session_state.load_error = f"Could not download CSV. Error: {e}"
+        st.session_state.message = "Failed to load puzzles."
+
 # =========================
 # App
 # =========================
@@ -172,7 +191,7 @@ with st.sidebar:
     with st.expander("📖 How it works", expanded=False):
         st.markdown("""
 - You **only earn money** by guessing a **consonant** that appears in the puzzle.
-- Spin → guess consonant → keep going until you miss.
+- Spin → guess consonant → if correct, keep playing; if wrong, lose a life.
 - Buy vowels (costs money) and solve anytime.
 - When lives hit **0**, it’s **Game Over**.
 """)
@@ -209,10 +228,14 @@ with st.sidebar:
     st.divider()
     st.header("Game Settings")
 
-    # Clamp for Streamlit widget safety (lives can be 0 in-game)
-    lives_for_widget = max(1, int(st.session_state.lives))
-    st.session_state.lives = int(
-        st.number_input("Lives (starting)", min_value=1, max_value=20, value=lives_for_widget)
+    # ✅ Starting lives control does NOT overwrite in-game lives
+    st.session_state.starting_lives = int(
+        st.number_input(
+            "Lives (starting)",
+            min_value=1,
+            max_value=20,
+            value=int(st.session_state.starting_lives),
+        )
     )
 
     vowel_cost = st.number_input("Vowel cost", min_value=50, max_value=500, value=250, step=50)
@@ -220,7 +243,7 @@ with st.sidebar:
 
     st.divider()
     if st.button("New Puzzle", disabled=not st.session_state.puzzles, use_container_width=True):
-        new_round(st.session_state.puzzles)
+        new_round(st.session_state.puzzles)  # ✅ resets lives
         st.rerun()
 
     if st.button("Reset Total Money", use_container_width=True):
@@ -236,11 +259,12 @@ puzzle = st.session_state.puzzle
 guessed_set = set(st.session_state.guessed_list)
 
 # Metrics (always visible)
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Round Money", f"${st.session_state.round_bank}")
 m2.metric("Total Money", f"${st.session_state.total_bank}")
-m3.metric("Current Spin", str(st.session_state.last_spin) if st.session_state.last_spin is not None else "—")
-m4.metric("Last Earned", f"${st.session_state.last_earned}")
+m3.metric("Lives", str(st.session_state.lives))
+m4.metric("Current Spin", str(st.session_state.last_spin) if st.session_state.last_spin is not None else "—")
+m5.metric("Last Earned", f"${st.session_state.last_earned}")
 
 st.subheader("Puzzle")
 st.markdown(
@@ -264,10 +288,8 @@ if st.session_state.lives <= 0:
             st.rerun()
     with colB:
         if st.button("🔄 Start New Game", use_container_width=True):
-            # New game: reset total + start puzzle
             st.session_state.total_bank = 0
-            st.session_state.lives = 5
-            new_round(st.session_state.puzzles)
+            new_round(st.session_state.puzzles)  # ✅ resets lives
             st.rerun()
 
     st.stop()
@@ -386,5 +408,5 @@ solved = all((ch not in ALPHABET) or (ch in guessed_set) for ch in puzzle)
 if solved:
     st.success("✅ PUZZLE SOLVED!")
     if auto_next and st.button("Next Puzzle ▶️"):
-        new_round(st.session_state.puzzles)
+        new_round(st.session_state.puzzles)  # ✅ resets lives
         st.rerun()
