@@ -9,7 +9,7 @@ import streamlit as st
 # =========================
 # Page setup
 # =========================
-st.set_page_config(page_title="GainSeeker Wheel of Fortune", layout="wide")
+st.set_page_config(page_title="Wheel of Fortune", layout="wide")
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 VOWELS = set("AEIOU")
@@ -275,4 +275,42 @@ with c2:
 with c3:
     vowel = st.text_input("Vowel", max_chars=1, key="vow").upper().strip()
     if st.button(f"Buy Vowel (-${vowel_cost})", use_container_width=True):
-        if st.sess
+        if st.session_state.round_bank < vowel_cost:
+            st.session_state.message = "Not enough money."
+        elif vowel not in VOWELS:
+            st.session_state.message = "Enter A, E, I, O, or U."
+        elif vowel in guessed:
+            st.session_state.message = f"{vowel} already guessed."
+        else:
+            st.session_state.round_bank -= vowel_cost
+            guessed.add(vowel)
+            hits = count_letter(puzzle, vowel)
+            if hits == 0:
+                st.session_state.lives -= 1
+                st.session_state.message = f"❌ No {vowel}"
+            else:
+                st.session_state.message = f"✅ {vowel} ×{hits}"
+        st.rerun()
+
+st.divider()
+
+# ---------- SOLVE ----------
+solution = st.text_input("Solve the puzzle", key="solve").strip()
+if st.button("Solve", use_container_width=False):
+    if normalize_phrase(solution) == puzzle:
+        st.session_state.total_bank += st.session_state.round_bank
+        st.session_state.message = f"🎉 CORRECT! +${st.session_state.round_bank}"
+        for ch in puzzle:
+            if ch in ALPHABET:
+                guessed.add(ch)
+    else:
+        st.session_state.lives -= 1
+        st.session_state.message = "❌ Wrong answer."
+    st.rerun()
+
+# ---------- WIN CHECK ----------
+if all((ch not in ALPHABET) or (ch in guessed) for ch in puzzle):
+    st.success("✅ PUZZLE SOLVED!")
+    if auto_next and st.button("Next Puzzle ▶️"):
+        new_round(st.session_state.puzzles)
+        st.rerun()
