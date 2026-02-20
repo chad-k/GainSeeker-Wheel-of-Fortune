@@ -20,13 +20,11 @@ DEFAULT_WHEEL = [
     "BANKRUPT", "LOSE A TURN"
 ]
 
-# Update this to match where the CSV is in your repo
 DEFAULT_CSV_URL = (
     "https://raw.githubusercontent.com/chad-k/GainSeeker-Wheel-of-Fortune/main/"
     "gainseeker_proper_nouns.csv"
 )
 
-# Allow doc-style proper nouns (numbers, slashes, dots, hyphens, etc.)
 ALLOWED_PUZZLE_RE = re.compile(r"^[A-Za-z0-9\s&\-\./'()]+$")
 
 # =========================
@@ -35,8 +33,8 @@ ALLOWED_PUZZLE_RE = re.compile(r"^[A-Za-z0-9\s&\-\./'()]+$")
 def normalize_phrase(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).upper()
 
-def mask_phrase(phrase: str, guessed: set[str]) -> str:
-    return "".join(ch if ch not in ALPHABET or ch in guessed else "■" for ch in phrase)
+def mask_phrase(phrase: str, guessed_set: set[str]) -> str:
+    return "".join(ch if ch not in ALPHABET or ch in guessed_set else "■" for ch in phrase)
 
 def count_letter(phrase: str, letter: str) -> int:
     return sum(1 for ch in phrase if ch == letter)
@@ -63,7 +61,6 @@ def load_puzzles_from_csv_bytes(file_bytes: bytes) -> list[str]:
             continue
         puzzles.append(normalize_phrase(s))
 
-    # De-dup, preserve order
     seen = set()
     out = []
     for p in puzzles:
@@ -82,15 +79,16 @@ def ensure_state():
     defaults = {
         "puzzles": [],
         "puzzle": "",
-        "guessed": set(),
-        "round_bank": 0,     # money for current puzzle
-        "total_bank": 0,     # cumulative money across puzzles
+        "guessed_list": [],      # ✅ store guessed letters as LIST (stable)
+        "round_bank": 0,
+        "total_bank": 0,
         "last_spin": None,
         "must_spin": True,
         "message": "Loading words...",
         "lives": 5,
         "csv_url": DEFAULT_CSV_URL,
         "load_error": "",
+        "last_earned": 0,        # ✅ show last earned
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -100,15 +98,14 @@ def new_round(puzzles: list[str]):
     if not puzzles:
         return
     st.session_state.puzzle = normalize_phrase(random.choice(puzzles))
-    st.session_state.guessed = set()
+    st.session_state.guessed_list = []
     st.session_state.round_bank = 0
     st.session_state.last_spin = None
     st.session_state.must_spin = True
-    # NOTE: Do NOT reset total_bank here
+    st.session_state.last_earned = 0
     st.session_state.message = "New puzzle loaded. Spin to start!"
 
 def auto_load_words():
-    # Only load once per session unless user forces a retry
     if st.session_state.puzzles:
         return
 
@@ -118,8 +115,8 @@ def auto_load_words():
         puzzles = load_puzzles_from_csv_bytes(data)
         if not puzzles:
             st.session_state.load_error = (
-                "Downloaded the CSV, but found no valid puzzles. "
-                "Check the CSV column name (ProperNounCandidate) or contents."
+                "Downloaded CSV, but no valid puzzles found. "
+                "Check column name (ProperNounCandidate) or file contents."
             )
             st.session_state.message = "Failed to load puzzles."
             return
@@ -127,6 +124,7 @@ def auto_load_words():
         st.session_state.puzzles = puzzles
         st.session_state.load_error = ""
         new_round(puzzles)
+
     except Exception as e:
         st.session_state.load_error = f"Could not download CSV from GitHub. Error: {e}"
         st.session_state.message = "Failed to load puzzles."
@@ -142,24 +140,17 @@ st.title("🎡 Wheel of Fortune")
 # ---------- SIDEBAR ----------
 with st.sidebar:
     st.header("How to Play")
-
     with st.expander("📖 How Wheel of Fortune Works", expanded=False):
         st.markdown("""
-### 🎯 Objective
-Solve the puzzle by guessing letters and earn as much money as possible before you run out of lives.
+### Key rule about money 💰
+You **only earn money** when you guess a **consonant** that appears in the puzzle.
+Spinning alone does **not** add money.
 
-### 🎡 Turn Flow
-1. **Spin**
-2. **Guess a consonant** (earns money)
-3. **Buy a vowel** (costs money)
-4. **Solve** anytime
-
-### 💣 Special Spins
-- **BANKRUPT**: Round money → $0
-- **LOSE A TURN**: spin again
-
-### ❤️ Lives
-Wrong consonant / wrong vowel / wrong solve = lose 1 life.
+### Turn flow
+1) Spin  
+2) Guess a consonant (earn money if it appears)  
+3) Buy vowels (costs money)  
+4) Solve anytime
 """)
 
     st.divider()
@@ -168,18 +159,12 @@ Wrong consonant / wrong vowel / wrong solve = lose 1 life.
 
     if st.session_state.load_error:
         st.error(st.session_state.load_error)
-        colA, colB = st.columns(2)
-        with colA:
-            if st.button("Retry Load", use_container_width=True):
-                st.session_state.puzzles = []
-                st.session_state.puzzle = ""
-                st.session_state.load_error = ""
-                st.cache_data.clear()
-                st.rerun()
-        with colB:
-            if st.button("Clear Cache", use_container_width=True):
-                st.cache_data.clear()
-                st.rerun()
+        if st.button("Retry Load", use_container_width=True):
+            st.session_state.puzzles = []
+            st.session_state.puzzle = ""
+            st.session_state.load_error = ""
+            st.cache_data.clear()
+            st.rerun()
     else:
         st.success(f"Loaded {len(st.session_state.puzzles)} puzzles.")
         with st.expander("Preview"):
@@ -188,10 +173,10 @@ Wrong consonant / wrong vowel / wrong solve = lose 1 life.
     st.divider()
     st.header("Game Settings")
 
-    # ✅ FIX: prevent StreamlitValueBelowMinError when lives hits 0 during play
-    current_lives_for_widget = max(1, int(st.session_state.lives))
+    # ✅ prevent sidebar crash if lives hits 0 during play
+    lives_for_widget = max(1, int(st.session_state.lives))
     st.session_state.lives = int(
-        st.number_input("Lives", min_value=1, max_value=20, value=current_lives_for_widget)
+        st.number_input("Lives", min_value=1, max_value=20, value=lives_for_widget)
     )
 
     vowel_cost = st.number_input("Vowel cost", min_value=50, max_value=500, value=250, step=50)
@@ -212,27 +197,26 @@ if not st.session_state.puzzle:
     st.stop()
 
 puzzle = st.session_state.puzzle
-guessed = st.session_state.guessed
+guessed_set = set(st.session_state.guessed_list)
 
-# ✅ MONEY DISPLAY (very visible)
-m1, m2, m3 = st.columns(3)
+# ✅ MONEY + SPIN display (so you can SEE changes immediately)
+m1, m2, m3, m4 = st.columns(4)
 m1.metric("Round Money", f"${st.session_state.round_bank}")
 m2.metric("Total Money", f"${st.session_state.total_bank}")
-m3.metric("Lives", f"{st.session_state.lives}")
+m3.metric("Current Spin", str(st.session_state.last_spin) if st.session_state.last_spin is not None else "—")
+m4.metric("Last Earned", f"${st.session_state.last_earned}")
 
 st.subheader("Puzzle")
 st.markdown(
     f"<div style='font-size:52px; letter-spacing:4px; font-weight:800; text-align:center;'>"
-    f"{mask_phrase(puzzle, guessed)}</div>",
+    f"{mask_phrase(puzzle, guessed_set)}</div>",
     unsafe_allow_html=True
 )
 
-st.caption(f"Guessed: {', '.join(sorted(guessed)) if guessed else '(none)'}")
+st.caption(f"Guessed: {', '.join(sorted(guessed_set)) if guessed_set else '(none)'}")
 st.info(st.session_state.message)
 
-# Disable game buttons if lives <= 0 (prevents weird states)
 game_over = st.session_state.lives <= 0
-
 c1, c2, c3 = st.columns(3)
 
 # ---------- SPIN ----------
@@ -240,6 +224,7 @@ with c1:
     if st.button("🎡 SPIN", use_container_width=True, disabled=game_over):
         result = random.choice(DEFAULT_WHEEL)
         st.session_state.last_spin = result
+        st.session_state.last_earned = 0
 
         if result == "BANKRUPT":
             st.session_state.round_bank = 0
@@ -259,25 +244,32 @@ with c2:
     if st.button("Guess Consonant", use_container_width=True, disabled=game_over):
         if not letter or letter not in ALPHABET:
             st.session_state.message = "Enter a single letter A–Z."
-        elif letter in guessed:
+        elif letter in guessed_set:
             st.session_state.message = f"{letter} already guessed."
         elif letter in VOWELS:
             st.session_state.message = "That’s a vowel. Use Buy Vowel."
         elif st.session_state.must_spin:
             st.session_state.message = "Spin first!"
+        elif not isinstance(st.session_state.last_spin, int):
+            st.session_state.message = "Spin a dollar amount first!"
         else:
-            guessed.add(letter)
+            # add letter
+            guessed_set.add(letter)
+            st.session_state.guessed_list = sorted(guessed_set)
+
             hits = count_letter(puzzle, letter)
             if hits:
                 earned = hits * int(st.session_state.last_spin)
-                st.session_state.round_bank += earned
+                st.session_state.round_bank = int(st.session_state.round_bank) + int(earned)
+                st.session_state.last_earned = int(earned)
                 st.session_state.message = f"✅ {letter} appears {hits} time(s). +${earned}"
             else:
+                st.session_state.last_earned = 0
                 st.session_state.lives -= 1
                 st.session_state.message = f"❌ No {letter}. Lives: {st.session_state.lives}"
 
-            # Classic flow: require spinning again after consonant guess
             st.session_state.must_spin = True
+
         st.rerun()
 
 # ---------- BUY VOWEL ----------
@@ -285,15 +277,20 @@ with c3:
     vowel = st.text_input("Vowel", max_chars=1, key="vow").upper().strip()
     if st.button(f"Buy Vowel (-${vowel_cost})", use_container_width=True, disabled=game_over):
         if st.session_state.round_bank < vowel_cost:
-            st.session_state.message = f"Not enough money to buy a vowel (need ${vowel_cost})."
+            st.session_state.message = f"Not enough money (need ${vowel_cost})."
         elif not vowel or vowel not in VOWELS:
             st.session_state.message = "Enter A, E, I, O, or U."
-        elif vowel in guessed:
+        elif vowel in guessed_set:
             st.session_state.message = f"{vowel} already guessed."
         else:
-            st.session_state.round_bank -= int(vowel_cost)
-            guessed.add(vowel)
+            st.session_state.round_bank = int(st.session_state.round_bank) - int(vowel_cost)
+
+            guessed_set.add(vowel)
+            st.session_state.guessed_list = sorted(guessed_set)
+
             hits = count_letter(puzzle, vowel)
+            st.session_state.last_earned = 0
+
             if hits == 0:
                 st.session_state.lives -= 1
                 st.session_state.message = f"❌ No {vowel}. Lives: {st.session_state.lives}"
@@ -307,20 +304,23 @@ st.divider()
 solution = st.text_input("Solve the puzzle", key="solve").strip()
 if st.button("Solve", disabled=game_over):
     if normalize_phrase(solution) == puzzle:
-        st.session_state.total_bank += st.session_state.round_bank
-        st.session_state.message = f"🎉 CORRECT! Banked ${st.session_state.round_bank}. Total = ${st.session_state.total_bank}"
-
-        # Reveal all letters
+        st.session_state.total_bank = int(st.session_state.total_bank) + int(st.session_state.round_bank)
+        st.session_state.message = (
+            f"🎉 CORRECT! Banked ${st.session_state.round_bank}. "
+            f"Total = ${st.session_state.total_bank}"
+        )
+        # reveal all letters
         for ch in puzzle:
             if ch in ALPHABET:
-                guessed.add(ch)
+                guessed_set.add(ch)
+        st.session_state.guessed_list = sorted(guessed_set)
     else:
         st.session_state.lives -= 1
         st.session_state.message = f"❌ Wrong answer. Lives: {st.session_state.lives}"
     st.rerun()
 
 # ---------- WIN / GAME OVER ----------
-solved = all((ch not in ALPHABET) or (ch in guessed) for ch in puzzle)
+solved = all((ch not in ALPHABET) or (ch in guessed_set) for ch in puzzle)
 if solved:
     st.success("✅ PUZZLE SOLVED!")
     if auto_next and st.button("Next Puzzle ▶️"):
@@ -329,8 +329,3 @@ if solved:
 
 if st.session_state.lives <= 0:
     st.error("💀 GAME OVER — You’re out of lives.")
-    if st.button("Start New Puzzle (Reset Round)", use_container_width=True):
-        # keep total_bank, reset round
-        st.session_state.lives = max(1, st.session_state.lives)  # sidebar clamps anyway
-        new_round(st.session_state.puzzles)
-        st.rerun()
